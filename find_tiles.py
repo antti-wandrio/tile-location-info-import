@@ -43,6 +43,7 @@ def numeric_osm_id(props: dict, id_col: str) -> str:
 
 
 def dissolve_level(gdf: gpd.GeoDataFrame, level: str, type_col: str, id_col: str) -> gpd.GeoDataFrame:
+    """Pakollinen taso: jos puuttuu → RuntimeError."""
     sub = gdf[
         (gdf.geometry.notnull())
         & (gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"]))
@@ -57,8 +58,26 @@ def dissolve_level(gdf: gpd.GeoDataFrame, level: str, type_col: str, id_col: str
     return sub
 
 
-def find_containing_uid(point: Point, gdf: gpd.GeoDataFrame) -> Optional[str]:
-    """Palauta numeerinen uid ensimmäiseltä polygonilta, joka CONTAINS pisteen; None jos ei löydy."""
+def dissolve_level_optional(gdf: gpd.GeoDataFrame, level: str, type_col: str, id_col: str) -> Optional[gpd.GeoDataFrame]:
+    """Valinnainen taso: jos puuttuu → palauta None."""
+    sub = gdf[
+        (gdf.geometry.notnull())
+        & (gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"]))
+        & (gdf["admin_level"].astype(str) == level)
+        & (gdf[type_col] == "relation")
+    ].copy()
+    if sub.empty:
+        return None
+    sub["uid"] = sub.apply(lambda r: numeric_osm_id(r, id_col), axis=1)
+    sub = sub.dissolve(by="uid", as_index=False, aggfunc="first")
+    _ = sub.sindex
+    return sub
+
+
+def find_containing_uid(point: Point, gdf: Optional[gpd.GeoDataFrame]) -> Optional[str]:
+    """Palauta numeerinen uid ensimmäiseltä polygonilta, joka CONTAINS pisteen; None jos ei löydy tai gdf puuttuu."""
+    if gdf is None:
+        return None
     cand_idx = list(gdf.sindex.intersection(point.bounds))
     for idx in cand_idx:
         geom = gdf.geometry.iloc[idx]
@@ -80,12 +99,12 @@ def main():
     if not type_col or not id_col:
         raise RuntimeError(f"Ei löytynyt type/id -sarakkeita. Löydetyt: {gdf_all.columns.tolist()}")
 
-    # Valmistele tasot 8, 4, 2
-    gdf8 = dissolve_level(gdf_all, "8", type_col, id_col)
-    gdf4 = dissolve_level(gdf_all, "4", type_col, id_col)
-    gdf2 = dissolve_level(gdf_all, "2", type_col, id_col)
+    # Tasot: L8 ja L2 pakollisia, L4 valinnainen
+    gdf8 = dissolve_level(gdf_all, "8", type_col, id_col)                 # pakollinen
+    gdf4 = dissolve_level_optional(gdf_all, "4", type_col, id_col)        # VALINNAINEN
+    gdf2 = dissolve_level(gdf_all, "2", type_col, id_col)                 # pakollinen (puuttuessa kaatuu)
 
-    # Selvitä L2-id etukäteen (tiedostonimeä varten)
+    # Selvitä L2-id (yksi maa → yleensä yksi uid)
     if gdf2["uid"].nunique() == 1:
         uid2_global = str(gdf2["uid"].iloc[0])
     else:
@@ -93,7 +112,7 @@ def main():
         inner_pt = gdf8.geometry.iloc[0].representative_point()
         uid2_global = find_containing_uid(inner_pt, gdf2) or str(gdf2["uid"].iloc[0])
 
-    output = Path(f"z14_level248_ids_{uid2_global}.csv")
+    output = Path(f"z14_level248_ids.csv")
 
     total_munis = len(gdf8)
     total_candidates = 0
@@ -112,7 +131,7 @@ def main():
                 continue
 
             inner_pt = geom8.representative_point()
-            uid4 = find_containing_uid(inner_pt, gdf4)  # numeerinen
+            uid4 = find_containing_uid(inner_pt, gdf4) or "-"   # <<<< L4 puuttuu → "-"
 
             minx, miny, maxx, maxy = geom8.bounds
             prepped8 = prep(geom8)
@@ -159,4 +178,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
