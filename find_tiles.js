@@ -31,10 +31,8 @@ const args = (() => {
     else if (k === "--region-level") { out.region = parseInt(v, 10); i++; }
     else if (k === "--country-id") { out.countryId = String(v); i++; }
     else if (k === "--out-prefix") { out.outPrefix = v; i++; }
-    //  else if (k === "--progress-every") { out.progressEvery = parseInt(v, 10); i++; }
   }
   out.progressEvery = 1;
-
   out.outPrefix = out.outPrefix || `z${out.z}_level248_ids`;
   return out;
 })();
@@ -51,8 +49,8 @@ function x2lon(x, z) { return x / Math.pow(2, z) * 360 - 180; }
 function y2lat(y, z) { const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z); return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
 function tileCenter(x, y, z) { return [x2lon(x + 0.5, z), y2lat(y + 0.5, z)]; }
 
-// ----------- streaming-luku (vain relation + polygonit + levelit {2,4,5,6,7,8}) -----------
-const ALLOWED_LEVELS = new Set(["2", "4", "5", "6", "7", "8"]);
+// ----------- streaming-luku (vain relation + polygonit + levelit {2,3,4,5,6,7,8,10}) -----------
+const ALLOWED_LEVELS = new Set(["2", "3", "4", "5", "6", "7", "8", "10"]);
 
 function acceptFeature(f) {
   if (!f || !f.properties || !f.geometry) return false;
@@ -68,21 +66,11 @@ async function loadFilteredFeaturesStream(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const feats = [];
   let ISO2 = null;
-  let hasAzores = false;
 
   function sniffISO(props) {
     if (ISO2) return;
     const iso = props.iso2 || props["ISO3166-1:alpha2"] || props["ISO3166-1"] || props["is_in:country_code"];
     if (iso && String(iso).trim()) ISO2 = String(iso).trim().toUpperCase().slice(0, 2);
-  }
-  function sniffAzores(props) {
-    if (hasAzores) return;
-    for (const [k, v] of Object.entries(props || {})) {
-      if (k.startsWith("ISO3166-2") && typeof v === "string" && v.toUpperCase().includes("PT-20")) {
-        hasAzores = true;
-        break;
-      }
-    }
   }
 
   if (ext === ".geojsonseq" || ext === ".ndjson") {
@@ -95,7 +83,6 @@ async function loadFilteredFeaturesStream(filePath) {
       if (acceptFeature(f)) {
         feats.push(f);
         sniffISO(f.properties);
-        sniffAzores(f.properties);
       }
     }
   } else {
@@ -113,7 +100,6 @@ async function loadFilteredFeaturesStream(filePath) {
         if (acceptFeature(f)) {
           feats.push(f);
           sniffISO(f.properties);
-          sniffAzores(f.properties);
         }
       }
     } else {
@@ -128,7 +114,6 @@ async function loadFilteredFeaturesStream(filePath) {
             if (acceptFeature(f)) {
               feats.push(f);
               sniffISO(f.properties);
-              sniffAzores(f.properties);
             }
             return null;
           }
@@ -140,20 +125,19 @@ async function loadFilteredFeaturesStream(filePath) {
     }
   }
 
-  return { feats, ISO2, IS_AZORES: ISO2 === "PT" && hasAzores };
+  return { feats, ISO2 };
 }
 
 // ----------- pää-ohjelma -----------
-
 (async function main() {
   if (!fs.existsSync(args.geojson)) {
     console.error(`ERROR: ei tiedostoa ${args.geojson}`);
     process.exit(2);
   }
 
-  const { feats, ISO2, IS_AZORES } = await loadFilteredFeaturesStream(args.geojson);
+  const { feats, ISO2 } = await loadFilteredFeaturesStream(args.geojson);
   if (!feats.length) {
-    console.error("ERROR: ei kelvollisia relation-polygonifeatureita (L2/L4/L5/L6/L7/L8).");
+    console.error("ERROR: ei kelvollisia relation-polygonifeatureita (L2/L3/L4/L5/L6/L7/L8/L10).");
     process.exit(3);
   }
 
@@ -178,7 +162,6 @@ async function loadFilteredFeaturesStream(filePath) {
     AL: { z: 14, expected: 8500, tolPct: 0.10 },
     EE: { z: 14, expected: 26826, tolPct: 0.10 },
     BA: { z: 14, expected: 16500, tolPct: 0.10 },
-
     HR: { z: 14, expected: 18900, tolPct: 0.10 },
     FO: { z: 14, expected: 1000, tolPct: 0.10 },
     GR: { z: 14, expected: 16312, tolPct: 0.10 },
@@ -199,24 +182,18 @@ async function loadFilteredFeaturesStream(filePath) {
     IS: { z: 14, expected: 96000, tolPct: 0.10 },
     BG: { z: 14, expected: 34000, tolPct: 0.10 },
     GI: { z: 14, expected: 2, tolPct: 0.10 },
-    GG: { z: 14, expected: 31, tolPct: 0.10 }, //guernsey
-    JE: { z: 14, expected: 73, tolPct: 0.10 }, //jersey
-    GB: { z: 14, expected: 115400, tolPct: 0.10 }, //gb
+    GG: { z: 14, expected: 31, tolPct: 0.10 },
+    JE: { z: 14, expected: 73, tolPct: 0.10 },
+    GB: { z: 14, expected: 115400, tolPct: 0.10 },
     TR: { z: 14, expected: 238285, tolPct: 0.10 },
-
-
-
   };
 
   // ---- Muni-kaskadi maakohtaisesti ----
-  // DE: kokeile tasot 8 -> 7 -> 6 -> 5 -> 4; jos tiili löytyy ylemmältä tasolta, älä enää vertaile alemmille
   const CASCADE_MUNI_LEVELS = {
     DE: [8, 7, 6, 5, 4],
-    PT: [8, 7],
     BA: [8, 7, 6, 5, 4],
     IE: [8, 7, 6],
     GB: [10, 8, 6, 5],
-
 
   };
 
@@ -238,15 +215,14 @@ async function loadFilteredFeaturesStream(filePath) {
     if (ISO2 === "AL") return { muni: 8, region: 4 };
     if (ISO2 === "AD") return { muni: 7, region: null };
     if (ISO2 === "AT") return { muni: 8, region: 4 };
-    if (IS_AZORES) return { muni: 7, region: 6 }; // portugal, azores
     if (ISO2 === "BY") return { muni: 8, region: 4 };
     if (ISO2 === "BE") return { muni: 8, region: 4 };
-    if (ISO2 === "BA") return { muni: 8, region: 4 };//bosnia, cascade
+    if (ISO2 === "BA") return { muni: 8, region: 4 }; // kaskadi hoitaa tarvittaessa
     if (ISO2 === "DK") return { muni: 7, region: 4 };
     if (ISO2 === "EE") return { muni: 7, region: 6 };
     if (ISO2 === "HR") return { muni: 7, region: 6 };
     if (ISO2 === "GE") return { muni: 6, region: 4 };
-    if (ISO2 === "DE") return { muni: 7, region: 4 }; // baseline viitteeksi; kaskadi ohittaa
+    if (ISO2 === "DE") return { muni: 7, region: 4 }; // kaskadi ohittaa
     if (ISO2 === "IM") return { muni: 8, region: 6 };
     if (ISO2 === "HU") return { muni: 8, region: 6 };
     if (ISO2 === "IE") return { muni: 8, region: 5 };
@@ -256,8 +232,6 @@ async function loadFilteredFeaturesStream(filePath) {
     if (ISO2 === "LT") return { muni: 6, region: 4 };
     if (ISO2 === "MT") return { muni: 8, region: 7 };
     if (ISO2 === "ME") return { muni: 6, region: null };
-    if (ISO2 === "PT") return { muni: 7, region: 6 };
-    if (ISO2 === "PT-20") return { muni: 7, region: 6 };
     if (ISO2 === "NO") return { muni: 7, region: 4 };
     if (ISO2 === "PL") return { muni: 7, region: 4 };
     if (ISO2 === "RU") return { muni: 6, region: 4 };
@@ -266,9 +240,10 @@ async function loadFilteredFeaturesStream(filePath) {
     if (ISO2 === "GI") return { muni: 4, region: null };
     if (ISO2 === "JE") return { muni: 8, region: null };
     if (ISO2 === "GG") return { muni: 8, region: null };
-    if (ISO2 === "SI") return { muni: 8, region: null };//slovenia  
-    if (ISO2 === "GB") return { muni: 10, region: 4 };//GB  
-    if (ISO2 === "TR") return { muni: 4, region: 3 };//turkey  
+    if (ISO2 === "SI") return { muni: 8, region: null };
+    if (ISO2 === "GB") return { muni: 10, region: 4 };
+    if (ISO2 === "TR") return { muni: 4, region: 3 };
+    if (ISO2 === "PT") return { muni: 7, region: 6 };
 
     return chooseAutoLevels();
   }
@@ -287,7 +262,7 @@ async function loadFilteredFeaturesStream(filePath) {
     if (!cascadeLevels.length) cascadeLevels = null; // jos dataa ei ole
   }
 
-  console.log(`[levels] iso=${ISO2 ?? "?"}${IS_AZORES ? " (PT-20/Azores)" : ""} | `
+  console.log(`[levels] iso=${ISO2 ?? "?"} | `
     + (cascadeLevels ? `muni=cascade[${cascadeLevels.join("→")}]` : `muni=${levels.muni}`)
     + `, region=${levels.region ?? "∅"}, country=2`);
 
@@ -364,10 +339,8 @@ async function loadFilteredFeaturesStream(filePath) {
   const outPath = path.resolve(`${args.outPrefix}_${outKey}.csv`);
   console.log(`[out] ${outPath}`);
 
-  // ----------- ryhmittely: kunnat ja alueet -----------
+  // ----------- ryhmittely: alueet -----------
   function numId(p) { return Number(String(p["@id"] ?? p.osm_id ?? p.id)); }
-
-  // Region-featurit (yksi taso), käytetään RP-pisteen PIP:iin
   const regionFeats = (levels.region != null ? (byLevel.get(levels.region) || []) : []).map(f => ({ id: numId(f.properties), f }));
 
   // ----------- apurit: bbox->tiilit ja PIP -----------
@@ -454,7 +427,6 @@ async function loadFilteredFeaturesStream(filePath) {
         for (let y = ty0; y <= ty1; y++) {
           cand++;
 
-          // Keskeytä tämän kunnan käsittely, jos ehdokkaita kertyy suhteettomasti löydettyihin nähden
           if (cand > 100000 && cand >= inside * 10) {
             console.warn(`[skip] L${L} kunta ${g.id} liian monta ehdokasta (${cand}) vs inside ${inside})`);
             break outerTiles;
@@ -502,7 +474,7 @@ async function loadFilteredFeaturesStream(filePath) {
   ws.end(() => {
     const dt = (Date.now() - start) / 1000;
     console.log(
-      `[report] iso=${ISO2 ?? "?"}${IS_AZORES ? " (PT-20/Azores)" : ""} `
+      `[report] iso=${ISO2 ?? "?"} `
       + `z=${Z} L2=${L2_ID || "None"} `
       + (cascadeLevels ? `muni=cascade[${cascadeLevels.join("→")}]` : `muni=${levels.muni}`)
       + ` region=${levels.region ?? "∅"} `
