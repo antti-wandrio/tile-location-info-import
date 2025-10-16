@@ -1,20 +1,75 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "Käyttö: $0 <country.osm.pbf>" >&2
-  exit 1
+usage() {
+  cat >&2 <<'USAGE'
+Käyttö (vain tämä muoto tuettu):
+  script.sh --pbf <country.osm.pbf> --iso2 <XX> [--country-id <RELATION_ID>]
+
+Selitys:
+  --pbf         OSM PBF -tiedosto (maa tai alue)
+  --iso2        ISO 3166-1 alpha-2 -koodi (esim. ES, PT). Käytetään:
+                  - aina: lisätään featurejen propertyyn "iso2"
+                  - vain jos --country-id puuttuu: rajataan geometria kyseiseen maahan (filter_by_iso.js)
+  --country-id  (valinnainen) L2 country relation id; jos annetaan, ohitetaan ISO2-rajauksen suoritus
+USAGE
+}
+
+# --- Argumenttien luku (vain lipuilla) ---
+PBF=""
+ISO2=""
+COUNTRY_ID_OVERRIDE=""
+
+if [[ $# -eq 0 ]]; then usage; exit 1; fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pbf)
+      [[ $# -ge 2 ]] || { echo "Virhe: --pbf vaatii arvon" >&2; exit 1; }
+      PBF="$2"; shift 2;;
+    --iso2)
+      [[ $# -ge 2 ]] || { echo "Virhe: --iso2 vaatii arvon" >&2; exit 1; }
+      ISO2="$2"; shift 2;;
+    --country-id)
+      [[ $# -ge 2 ]] || { echo "Virhe: --country-id vaatii arvon" >&2; exit 1; }
+      COUNTRY_ID_OVERRIDE="$2"; shift 2;;
+    -h|--help)
+      usage; exit 0;;
+    *)
+      echo "Tuntematon lippu: $1" >&2; usage; exit 1;;
+  esac
+done
+
+# --- Tarkistukset ---
+if [[ -z "$PBF" || -z "$ISO2" ]]; then
+  echo "Virhe: --pbf ja --iso2 ovat pakollisia." >&2
+  usage; exit 1
 fi
 
-PBF="$1"
 if [[ ! -f "$PBF" ]]; then
   echo "Virhe: tiedostoa ei löydy: $PBF" >&2
   exit 2
 fi
 
-echo "==> PBF: $PBF"
+# Normalisoi ISO2: 2 kirjainta
+ISO2="$(echo "$ISO2" | tr '[:lower:]' '[:upper:]' | cut -c1-2)"
+if ! [[ "$ISO2" =~ ^[A-Z]{2}$ ]]; then
+  echo "Virhe: --iso2 pitää olla 2 kirjainta (esim. ES)." >&2
+  exit 1
+fi
 
-# Siivoa välitiedostot
+if [[ -n "$COUNTRY_ID_OVERRIDE" && ! "$COUNTRY_ID_OVERRIDE" =~ ^[0-9]+$ ]]; then
+  echo "Virhe: --country-id pitää olla numero (OSM relation id)." >&2
+  exit 1
+fi
+
+echo "==> PBF: $PBF"
+echo "==> ISO2: $ISO2"
+if [[ -n "$COUNTRY_ID_OVERRIDE" ]]; then
+  echo "==> COUNTRY_ID (override): $COUNTRY_ID_OVERRIDE"
+fi
+
+# --- Siivoa välitiedostot ---
 rm -f admin.osm.pbf admin.geojson admin-filtered.geojson admin-248.geojson
 rm -f z14_level248_ids*.csv
 
@@ -38,48 +93,55 @@ jq '
   )
 ' admin.geojson > admin-filtered.geojson
 
-echo "==> Päätellään ISO2 (jos mahdollista)"
-ISO="$(jq -r '
-  # ensisijaisesti admin_level=2
-  (.features[]
-   | select(.properties["@type"]=="relation" and .properties.admin_level=="2")
-   | .properties["ISO3166-1:alpha2"] // .properties["ISO3166-1"] // .properties["is_in:country_code"]) // empty
-' admin-filtered.geojson | head -n1)"
+# --- ISO2-rajauksen suoritus vain jos COUNTRY_ID ei ole annettu ---
+if [[ -z "$COUNTRY_ID_OVERRIDE" ]]; then
+  echo "==> Rajataan vain ISO2=$ISO2 alueeseen filter_by_iso.js:llä (tmp -> mv)"
+  TMP_FILTERED="$(mktemp -t admin_filtered_XXXXXX.json)"
+  cleanup_tmp() { [[ -n "${TMP_FILTERED:-}" && -f "$TMP_FILTERED" ]] && rm -f "$TMP_FILTERED"; }
+  trap cleanup_tmp EXIT
 
-if [[ -z "${ISO:-}" ]]; then
-  # fallback: ISO3166-2:* tyyliin "PT-20" -> "PT"
-  ISO="$(jq -r '
-    .features[] | .properties | to_entries[] |
-    select(.key | startswith("ISO3166-2")) | .value |
-    select(type=="string" and contains("-")) | split("-")[0]
-  ' admin-filtered.geojson | head -n1)"
-fi
+  node filter_by_iso.js admin-filtered.geojson "$TMP_FILTERED" "$ISO2"
 
-if [[ -n "${ISO:-}" ]]; then
-  ISO="$(echo "$ISO" | tr '[:lower:]' '[:upper:]' | cut -c1-2)"
-  echo "==> ISO2: $ISO"
+  # Pikacheck: ettei jäänyt tyhjäksi
+  if ! jq -e '.features|length>0' "$TMP_FILTERED" >/dev/null; then
+    echo "Virhe: L2 ISO2=$ISO2 ei löytynyt rajaukseen." >&2
+    exit 3
+  fi
+
+  mv -f "$TMP_FILTERED" admin-filtered.geojson
+  TMP_FILTERED=""  # estä trapin poisto mv:n jälkeen
 else
-  echo "==> ISO2 ei löytynyt (ok alialue-extracteissa)"
+  echo "==> COUNTRY_ID annettu -> ohitetaan ISO2-rajauksen suoritus"
 fi
 
-echo "==> Lisätään iso2 kaikkiin featureihin (jos löytyi)"
-jq --arg iso "$ISO" '
+echo "==> Lisätään iso2 kaikkiin featureihin (vain tagiksi)"
+jq --arg iso "$ISO2" '
   .features |= map(
     .properties |= ( if ($iso|length)>0 then . + {iso2: $iso} else . end )
   )
 ' admin-filtered.geojson > admin-248.geojson
 
-# Country-id talteen: admin_level=2 -> @id/osm_id/id
-COUNTRY_ID="$(jq -r '
-  .features[]
-  | select(.properties["@type"]=="relation" and .properties.admin_level=="2")
-  | (.properties["@id"] // .properties.osm_id // .properties.id)
-' admin-248.geojson | head -n1 || true)"
+# --- Country relation id ---
+COUNTRY_ID=""
+if [[ -n "$COUNTRY_ID_OVERRIDE" ]]; then
+  COUNTRY_ID="$COUNTRY_ID_OVERRIDE"
+else
+  COUNTRY_ID="$(jq -r '
+    .features[]
+    | select(.properties["@type"]=="relation" and .properties.admin_level=="2")
+    | (.properties["@id"] // .properties.osm_id // .properties.id)
+  ' admin-248.geojson | head -n1 || true)"
 
-# PT-fallback: jos L2 puuttuu mutta ISO=PT, käytä Portugalin relation-id:tä
-if [[ -z "$COUNTRY_ID" && "${ISO:-}" == "PT" ]]; then
-  COUNTRY_ID="295480"
-  echo "==> L2 puuttuu, ISO=PT -> käytetään Portugalin country-id:tä: $COUNTRY_ID"
+  # (Valinnaiset fallbackit — pidetään varalta)
+  if [[ -z "$COUNTRY_ID" && "$ISO2" == "PT" ]]; then
+    COUNTRY_ID="295480"; echo "==> L2 puuttuu, ISO=PT -> käytetään country-id:tä: $COUNTRY_ID"
+  fi
+  if [[ -z "$COUNTRY_ID" && "$ISO2" == "NO" ]]; then
+    COUNTRY_ID="1059668"; echo "==> L2 puuttuu, ISO=NO -> käytetään country-id:tä: $COUNTRY_ID"
+  fi
+  if [[ -z "$COUNTRY_ID" && "$ISO2" == "ES" ]]; then
+    COUNTRY_ID="1311341"; echo "==> L2 puuttuu, ISO=ES -> käytetään country-id:tä: $COUNTRY_ID"
+  fi
 fi
 
 if [[ -n "$COUNTRY_ID" ]]; then
@@ -92,21 +154,22 @@ echo "==> Tasojakauma:"
 jq -r '.features[].properties.admin_level' admin-248.geojson | sort | uniq -c || true
 echo
 
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=10000}"
+
 echo "==> Haetaan tiilet (Node, käyttää admin-248.geojson)"
 NODE_ARGS=( "--geojson" "admin-248.geojson" )
 if [[ -n "$COUNTRY_ID" ]]; then
   NODE_ARGS+=( "--country-id" "$COUNTRY_ID" )
 fi
 node find_tiles.js "${NODE_ARGS[@]}"
- 
 
+echo "==> Import admin areas to Firestore"
 node import_admins_to_firestore.js \
   --admins-json admin-248.geojson \
   --project wandrio \
   --creds serviceAccountKey.json
-  
+
 echo "==> Import tile_meta_z14 Firestoreen"
-# poimi uusin CSV (mtime)
 CSV="$(ls -1t z14_level248_ids_*.csv | head -n1)"
 if [[ -z "${CSV:-}" || ! -f "$CSV" ]]; then
   echo "Virhe: z14_level248_ids_*.csv ei löytynyt." >&2

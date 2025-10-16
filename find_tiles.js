@@ -31,8 +31,10 @@ const args = (() => {
     else if (k === "--region-level") { out.region = parseInt(v, 10); i++; }
     else if (k === "--country-id") { out.countryId = String(v); i++; }
     else if (k === "--out-prefix") { out.outPrefix = v; i++; }
-    else if (k === "--progress-every") { out.progressEvery = parseInt(v, 10); i++; }
+    //  else if (k === "--progress-every") { out.progressEvery = parseInt(v, 10); i++; }
   }
+  out.progressEvery = 1;
+
   out.outPrefix = out.outPrefix || `z${out.z}_level248_ids`;
   return out;
 })();
@@ -49,8 +51,8 @@ function x2lon(x, z) { return x / Math.pow(2, z) * 360 - 180; }
 function y2lat(y, z) { const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z); return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
 function tileCenter(x, y, z) { return [x2lon(x + 0.5, z), y2lat(y + 0.5, z)]; }
 
-// ----------- streaming-luku (vain relation + polygonit + levelit {2,4,6,7,8}) -----------
-const ALLOWED_LEVELS = new Set(["2", "4", "6", "7", "8"]);
+// ----------- streaming-luku (vain relation + polygonit + levelit {2,4,5,6,7,8}) -----------
+const ALLOWED_LEVELS = new Set(["2", "4", "5", "6", "7", "8"]);
 
 function acceptFeature(f) {
   if (!f || !f.properties || !f.geometry) return false;
@@ -151,7 +153,7 @@ async function loadFilteredFeaturesStream(filePath) {
 
   const { feats, ISO2, IS_AZORES } = await loadFilteredFeaturesStream(args.geojson);
   if (!feats.length) {
-    console.error("ERROR: ei kelvollisia relation-polygonifeatureita (L2/L4/L6/L7/L8).");
+    console.error("ERROR: ei kelvollisia relation-polygonifeatureita (L2/L4/L5/L6/L7/L8).");
     process.exit(3);
   }
 
@@ -167,16 +169,54 @@ async function loadFilteredFeaturesStream(filePath) {
   const COVERAGE_RULES = {
     CY: { baselineLevel: 6, min: 0.95 },
     DK: { baselineLevel: 4, min: 0.95 },
-    EE: { baselineLevel: 2, min: 0.25 }, // ei käytetä jos tiilisääntö on voimassa
+    RU: { baselineLevel: 2, min: 0.01 },
+    UA: { baselineLevel: 2, min: 0.85 },
   };
 
   // ---- Country-specific tile expectations (ohittaa area-peiton) ----
   const TILE_EXPECTATIONS = {
+    AL: { z: 14, expected: 8500, tolPct: 0.10 },
     EE: { z: 14, expected: 26826, tolPct: 0.10 },
     BA: { z: 14, expected: 16500, tolPct: 0.10 },
-    BG: { z: 14, expected: 34300, tolPct: 0.10 },
+
     HR: { z: 14, expected: 18900, tolPct: 0.10 },
-    SM: { z: 14, expected: 92600, tolPct: 0.10 },
+    FO: { z: 14, expected: 1000, tolPct: 0.10 },
+    GR: { z: 14, expected: 16312, tolPct: 0.10 },
+    DE: { z: 14, expected: 150750, tolPct: 0.10 },
+    IM: { z: 14, expected: 280, tolPct: 0.10 },
+    IE: { z: 14, expected: 35900, tolPct: 0.20 },
+    IT: { z: 14, expected: 92580, tolPct: 0.10 },
+    XK: { z: 14, expected: 3350, tolPct: 0.10 },
+    LV: { z: 14, expected: 34000, tolPct: 0.10 },
+    LT: { z: 14, expected: 34000, tolPct: 0.10 },
+    MT: { z: 14, expected: 79, tolPct: 0.10 },
+    MC: { z: 14, expected: 2, tolPct: 0.10 },
+    ME: { z: 14, expected: 4255, tolPct: 0.10 },
+    PL: { z: 14, expected: 138000, tolPct: 0.10 },
+    RS: { z: 14, expected: 18957, tolPct: 0.10 },
+    SK: { z: 14, expected: 18100, tolPct: 0.10 },
+    ES: { z: 14, expected: 144137, tolPct: 0.10 },
+    IS: { z: 14, expected: 96000, tolPct: 0.10 },
+    BG: { z: 14, expected: 34000, tolPct: 0.10 },
+    GI: { z: 14, expected: 2, tolPct: 0.10 },
+    GG: { z: 14, expected: 31, tolPct: 0.10 }, //guernsey
+    JE: { z: 14, expected: 73, tolPct: 0.10 }, //jersey
+    GB: { z: 14, expected: 115400, tolPct: 0.10 }, //gb
+    TR: { z: 14, expected: 238285, tolPct: 0.10 },
+
+
+
+  };
+
+  // ---- Muni-kaskadi maakohtaisesti ----
+  // DE: kokeile tasot 8 -> 7 -> 6 -> 5 -> 4; jos tiili löytyy ylemmältä tasolta, älä enää vertaile alemmille
+  const CASCADE_MUNI_LEVELS = {
+    DE: [8, 7, 6, 5, 4],
+    PT: [8, 7],
+    BA: [8, 7, 6, 5, 4],
+    IE: [8, 7, 6],
+    GB: [10, 8, 6, 5],
+
 
   };
 
@@ -195,17 +235,41 @@ async function loadFilteredFeaturesStream(filePath) {
   }
 
   function chooseLevelsByCountry() {
-    if (ISO2 === "AL") return { muni: 8, region: 6 };
+    if (ISO2 === "AL") return { muni: 8, region: 4 };
     if (ISO2 === "AD") return { muni: 7, region: null };
     if (ISO2 === "AT") return { muni: 8, region: 4 };
-    if (IS_AZORES) return { muni: 7, region: 4 };
+    if (IS_AZORES) return { muni: 7, region: 6 }; // portugal, azores
     if (ISO2 === "BY") return { muni: 8, region: 4 };
     if (ISO2 === "BE") return { muni: 8, region: 4 };
-    if (ISO2 === "BA") return { muni: 5, region: 4 };  // pyyntösi mukainen valinta
-    if (ISO2 === "BG") return { muni: 5, region: 4 };  // pyyntösi mukainen valinta
+    if (ISO2 === "BA") return { muni: 8, region: 4 };//bosnia, cascade
     if (ISO2 === "DK") return { muni: 7, region: 4 };
     if (ISO2 === "EE") return { muni: 7, region: 6 };
     if (ISO2 === "HR") return { muni: 7, region: 6 };
+    if (ISO2 === "GE") return { muni: 6, region: 4 };
+    if (ISO2 === "DE") return { muni: 7, region: 4 }; // baseline viitteeksi; kaskadi ohittaa
+    if (ISO2 === "IM") return { muni: 8, region: 6 };
+    if (ISO2 === "HU") return { muni: 8, region: 6 };
+    if (ISO2 === "IE") return { muni: 8, region: 5 };
+    if (ISO2 === "SM") return { muni: 8, region: 6 };
+    if (ISO2 === "IT") return { muni: 6, region: 4 };
+    if (ISO2 === "XK") return { muni: 6, region: 4 };
+    if (ISO2 === "LT") return { muni: 6, region: 4 };
+    if (ISO2 === "MT") return { muni: 8, region: 7 };
+    if (ISO2 === "ME") return { muni: 6, region: null };
+    if (ISO2 === "PT") return { muni: 7, region: 6 };
+    if (ISO2 === "PT-20") return { muni: 7, region: 6 };
+    if (ISO2 === "NO") return { muni: 7, region: 4 };
+    if (ISO2 === "PL") return { muni: 7, region: 4 };
+    if (ISO2 === "RU") return { muni: 6, region: 4 };
+    if (ISO2 === "IS") return { muni: 6, region: 5 };
+    if (ISO2 === "BG") return { muni: 8, region: 4 };
+    if (ISO2 === "GI") return { muni: 4, region: null };
+    if (ISO2 === "JE") return { muni: 8, region: null };
+    if (ISO2 === "GG") return { muni: 8, region: null };
+    if (ISO2 === "SI") return { muni: 8, region: null };//slovenia  
+    if (ISO2 === "GB") return { muni: 10, region: 4 };//GB  
+    if (ISO2 === "TR") return { muni: 4, region: 3 };//turkey  
+
     return chooseAutoLevels();
   }
 
@@ -216,13 +280,22 @@ async function loadFilteredFeaturesStream(filePath) {
   if (args.muni) levels.muni = args.muni;
   if (args.region !== undefined) levels.region = args.region;
 
-  console.log(`[levels] iso=${ISO2 ?? "?"}${IS_AZORES ? " (PT-20/Azores)" : ""} | muni=${levels.muni}, region=${levels.region ?? "∅"}, country=2`);
+  // Valitaan kaskadi (jos määritelty maalle) ja rajataan vain olemassa oleviin tasoihin
+  let cascadeLevels = null;
+  if (CASCADE_MUNI_LEVELS[ISO2]) {
+    cascadeLevels = CASCADE_MUNI_LEVELS[ISO2].filter(l => (byLevel.get(l) || []).length > 0);
+    if (!cascadeLevels.length) cascadeLevels = null; // jos dataa ei ole
+  }
 
-  // ---- Coverage check (ohitetaan jos maalle on tiilimääräsääntö) ----
+  console.log(`[levels] iso=${ISO2 ?? "?"}${IS_AZORES ? " (PT-20/Azores)" : ""} | `
+    + (cascadeLevels ? `muni=cascade[${cascadeLevels.join("→")}]` : `muni=${levels.muni}`)
+    + `, region=${levels.region ?? "∅"}, country=2`);
+
+  // ---- Coverage check (ohitetaan kaskadia käytettäessä tai jos maalle on tiilisääntö) ----
   const tileRule = TILE_EXPECTATIONS[ISO2];
   const hasTileRule = !!(tileRule && tileRule.z === args.z);
 
-  if (!hasTileRule) {
+  if (!hasTileRule && !cascadeLevels) {
     function _numIdFromProps(p) { return Number(String(p["@id"] ?? p.osm_id ?? p.id)); }
     function _sumAreaUnique(featArr) {
       const seen = new Set(); let total = 0;
@@ -264,14 +337,19 @@ async function loadFilteredFeaturesStream(filePath) {
       }
     }
   } else {
-    console.log(`[coverage] ohitettu: käytetään ${ISO2} tiilimääräsääntöä (z=${args.z})`);
+    if (cascadeLevels) console.log("[coverage] ohitettu: käytössä kunnallistason kaskadi.");
+    if (hasTileRule) console.log(`[coverage] ohitettu: käytetään ${ISO2} tiilimääräsääntöä (z=${args.z}).`);
   }
 
   // L2 (voi puuttua alialue-extractissa)
   const level2 = byLevel.get(2) || [];
   let L2_ID = null;
   if (level2.length) {
-    const anyMuni = (byLevel.get(levels.muni) || [])[0];
+    // Valitaan jokin kunnallisfeature (ylä-/kaskaditasolta) maapistetestiä varten
+    const anyMuni =
+      (cascadeLevels
+        ? (byLevel.get(cascadeLevels[0]) || [])[0]
+        : (byLevel.get(levels.muni) || [])[0]);
     if (anyMuni) {
       const pt = turf.point(turf.pointOnFeature(anyMuni).geometry.coordinates);
       const hit = level2.find(f => turf.booleanPointInPolygon(pt, f, { ignoreBoundary: false }));
@@ -288,14 +366,9 @@ async function loadFilteredFeaturesStream(filePath) {
 
   // ----------- ryhmittely: kunnat ja alueet -----------
   function numId(p) { return Number(String(p["@id"] ?? p.osm_id ?? p.id)); }
-  const muniFeats = (byLevel.get(levels.muni) || []).map(f => ({ id: numId(f.properties), f }));
-  const regionFeats = (levels.region != null ? (byLevel.get(levels.region) || []) : []).map(f => ({ id: numId(f.properties), f }));
 
-  const muniGroups = new Map(); // id -> {id, geoms[], props}
-  for (const { id, f } of muniFeats) {
-    if (!muniGroups.has(id)) muniGroups.set(id, { id, geoms: [], props: f.properties });
-    muniGroups.get(id).geoms.push(f.geometry);
-  }
+  // Region-featurit (yksi taso), käytetään RP-pisteen PIP:iin
+  const regionFeats = (levels.region != null ? (byLevel.get(levels.region) || []) : []).map(f => ({ id: numId(f.properties), f }));
 
   // ----------- apurit: bbox->tiilit ja PIP -----------
   function geomBBox(g) {
@@ -335,71 +408,106 @@ async function loadFilteredFeaturesStream(filePath) {
   ws.write("z,x,y,lon,lat,place_id,region_id,country_id,p_level,r_level\n");
 
   let totalCand = 0, totalInside = 0, written = 0;
-  const seen = new Set();
+  const seen = new Set(); // estää tiilin tuplakirjoituksen alemmilla tasoilla
   const start = Date.now();
 
-  let idx = 0;
-  for (const g of muniGroups.values()) {
-    idx++;
-    const rp = turf.pointOnFeature({
-      type: "FeatureCollection",
-      features: g.geoms.map(geom => ({ type: "Feature", properties: {}, geometry: geom }))
-    });
-    const rpPoint = turf.point(rp.geometry.coordinates);
-    const regId = regionIdForPoint(rpPoint);
-    const natId = natIdForPoint(rpPoint);
+  // Yksi ajosilmukka: joko kaskadi tai yksittäinen taso
+  const runLevels = cascadeLevels || [levels.muni];
 
-    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-    for (const geom of g.geoms) {
-      const b = geomBBox(geom);
-      if (b[0] < minx) minx = b[0];
-      if (b[1] < miny) miny = b[1];
-      if (b[2] > maxx) maxx = b[2];
-      if (b[3] > maxy) maxy = b[3];
+  let globalIdx = 0;
+  for (const L of runLevels) {
+    // Rakenna kunnallisryhmät tälle tasolle
+    const muniFeatsL = (byLevel.get(L) || []).map(f => ({ id: numId(f.properties), f }));
+    const muniGroups = new Map(); // id -> {id, geoms[], props, level}
+    for (const { id, f } of muniFeatsL) {
+      if (!muniGroups.has(id)) muniGroups.set(id, { id, geoms: [], props: f.properties, level: L });
+      muniGroups.get(id).geoms.push(f.geometry);
     }
 
-    const tx0 = lon2x(minx, Z), tx1 = lon2x(maxx, Z);
-    const ty0 = lat2y(maxy, Z), ty1 = lat2y(miny, Z);
-    let cand = 0, inside = 0;
+    let levelCand = 0, levelInside = 0;
 
-    for (let x = tx0; x <= tx1; x++) {
-      for (let y = ty0; y <= ty1; y++) {
-        cand++;
-        const key = `${Z}/${x}/${y}`;
-        if (seen.has(key)) continue;
-        const [lon, lat] = tileCenter(x, y, Z);
-        const pt = turf.point([lon, lat]);
-        if (!pointInAnyGeom(pt, g.geoms)) continue;
+    for (const g of muniGroups.values()) {
+      globalIdx++;
+      const rp = turf.pointOnFeature({
+        type: "FeatureCollection",
+        features: g.geoms.map(geom => ({ type: "Feature", properties: {}, geometry: geom }))
+      });
+      const rpPoint = turf.point(rp.geometry.coordinates);
+      const regId = regionIdForPoint(rpPoint);
+      const natId = natIdForPoint(rpPoint);
 
-        seen.add(key);
-        inside++;
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (const geom of g.geoms) {
+        const b = geomBBox(geom);
+        if (b[0] < minx) minx = b[0];
+        if (b[1] < miny) miny = b[1];
+        if (b[2] > maxx) maxx = b[2];
+        if (b[3] > maxy) maxy = b[3];
+      }
 
-        const rLevelOut = regId ? (levels.region ?? "") : "";
-        ws.write(`${Z},${x},${y},${lon},${lat},${g.id},${regId ?? ""},${natId ?? ""},${levels.muni},${rLevelOut}\n`);
-        written++;
+      const tx0 = lon2x(minx, Z), tx1 = lon2x(maxx, Z);
+      const ty0 = lat2y(maxy, Z), ty1 = lat2y(miny, Z);
+      let cand = 0, inside = 0;
+
+      outerTiles:
+      for (let x = tx0; x <= tx1; x++) {
+        for (let y = ty0; y <= ty1; y++) {
+          cand++;
+
+          // Keskeytä tämän kunnan käsittely, jos ehdokkaita kertyy suhteettomasti löydettyihin nähden
+          if (cand > 100000 && cand >= inside * 10) {
+            console.warn(`[skip] L${L} kunta ${g.id} liian monta ehdokasta (${cand}) vs inside ${inside})`);
+            break outerTiles;
+          }
+
+          const key = `${Z}/${x}/${y}`;
+          if (seen.has(key)) continue; // jo löytynyt ylemmältä tasolta
+
+          const [lon, lat] = tileCenter(x, y, Z);
+          const pt = turf.point([lon, lat]);
+          if (!pointInAnyGeom(pt, g.geoms)) continue;
+
+          seen.add(key); // lukitse tiili tälle tasolle -> ei enää alemmille
+          inside++;
+
+          const rLevelOut = regId ? (levels.region ?? "") : "";
+          ws.write(`${Z},${x},${y},${lon},${lat},${g.id},${regId ?? ""},${natId ?? ""},${L},${rLevelOut}\n`);
+          written++;
+        }
+      }
+
+      levelCand += cand; levelInside += inside;
+      totalCand += cand; totalInside += inside;
+
+      if (args.progressEvery && (globalIdx % Math.max(1, args.progressEvery) === 0)) {
+        const dt = (Date.now() - start) / 1000;
+        const rate = dt > 0 ? (written / dt) : 0;
+        const name = g.props["name:en"] || g.props["name:fi"] || g.props.name || g.id;
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, "0");
+        const mm = String(now.getMinutes()).padStart(2, "0");
+        const ss = String(now.getSeconds()).padStart(2, "0");
+        const timeStr = `${hh}:${mm}:${ss}`;
+
+        console.log(
+          `[${timeStr}] [L${L}] cand=${cand} inside=${inside} | total_inside=${totalInside} | `
+          + `${name} | ${(dt).toFixed(1)}s @ ${rate.toFixed(1)} tiles/s`
+        );
       }
     }
 
-    totalCand += cand; totalInside += inside;
-
-    if (args.progressEvery && (idx % Math.max(1, args.progressEvery) === 0)) {
-      const dt = (Date.now() - start) / 1000;
-      const rate = dt > 0 ? (written / dt) : 0;
-      const name = g.props["name:en"] || g.props["name:fi"] || g.props.name || g.id;
-      console.log(
-        `[${idx}/${muniGroups.size}] ${name} cand=${cand} inside=${inside} | total_inside=${totalInside} | ` +
-        `${dt.toFixed(1)}s @ ${rate.toFixed(1)} tiles/s`
-      );
-    }
+    console.log(`[level-report] L${L}: cand=${levelCand} inside=${levelInside}`);
   }
 
   ws.end(() => {
     const dt = (Date.now() - start) / 1000;
     console.log(
-      `[report] iso=${ISO2 ?? "?"}${IS_AZORES ? " (PT-20/Azores)" : ""} ` +
-      `z=${Z} L2=${L2_ID || "None"} muni=${levels.muni} region=${levels.region ?? "∅"} ` +
-      `munis=${muniGroups.size} tiles=${written} cand=${totalCand} time=${dt.toFixed(1)}s ` +
-      `rate=${(written / (dt || 1)).toFixed(1)}/s out=${outPath}`
+      `[report] iso=${ISO2 ?? "?"}${IS_AZORES ? " (PT-20/Azores)" : ""} `
+      + `z=${Z} L2=${L2_ID || "None"} `
+      + (cascadeLevels ? `muni=cascade[${cascadeLevels.join("→")}]` : `muni=${levels.muni}`)
+      + ` region=${levels.region ?? "∅"} `
+      + `tiles=${written} cand=${totalCand} time=${dt.toFixed(1)}s `
+      + `rate=${(written / (dt || 1)).toFixed(1)}/s out=${outPath}`
     );
 
     // --- Tiilimäärä-tarkistus (ohittaa area-peiton, jos sääntö löytyy) ---
